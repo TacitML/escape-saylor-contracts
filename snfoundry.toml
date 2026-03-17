@@ -1,0 +1,9 @@
+[snforge]
+
+[sncast.sepolia]
+url = "https://starknet-sepolia.public.blastapi.io/rpc/v0_7"
+account = "deployer"
+
+[sncast.mainnet]
+url = "https://starknet-mainnet.public.blastapi.io/rpc/v0_7"
+account = "deployer"
