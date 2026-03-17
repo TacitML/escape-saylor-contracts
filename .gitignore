@@ -1,0 +1,5 @@
+# Scarb build artifacts
+target/
+
+# Starknet Foundry cache
+.snfoundry_cache/
