@@ -1,6 +1,7 @@
 #[starknet::contract]
 pub mod RewardPool {
     use starknet::{ContractAddress, get_caller_address, get_contract_address};
+    use core::num::traits::Zero;
     use starknet::storage::{
         StoragePointerReadAccess, StoragePointerWriteAccess, StoragePathEntry, Map,
     };
@@ -50,10 +51,18 @@ pub mod RewardPool {
     pub enum Event {
         #[flat]
         OwnableEvent: OwnableComponent::Event,
+        Initialized: Initialized,
         WeekFunded: WeekFunded,
         ToppedUp: ToppedUp,
         RewardsDistributed: RewardsDistributed,
         MaxDistributionBpsUpdated: MaxDistributionBpsUpdated,
+    }
+
+    #[derive(Drop, starknet::Event)]
+    pub struct Initialized {
+        pub owner: ContractAddress,
+        pub token: ContractAddress,
+        pub max_distribution_bps: u16,
     }
 
     #[derive(Drop, starknet::Event)]
@@ -98,15 +107,22 @@ pub mod RewardPool {
         pub const EMPTY_RECIPIENTS: felt252 = 'RP: empty recipients';
         pub const INVALID_BPS: felt252 = 'RP: bps exceeds 10000';
         pub const TRANSFER_FAILED: felt252 = 'RP: transfer failed';
+        pub const ZERO_ADDRESS: felt252 = 'RP: zero address';
+        pub const ZERO_DISTRIBUTION_ID: felt252 = 'RP: zero distribution id';
     }
 
     // ── Constructor ───────────────────────────────────────────────
 
     #[constructor]
     fn constructor(ref self: ContractState, owner: ContractAddress, token: ContractAddress) {
+        assert(!owner.is_zero(), Errors::ZERO_ADDRESS);
+        assert(!token.is_zero(), Errors::ZERO_ADDRESS);
+
         self.ownable.initializer(owner);
         self.token.write(token);
         self.max_distribution_bps.write(DEFAULT_MAX_BPS);
+
+        self.emit(Initialized { owner, token, max_distribution_bps: DEFAULT_MAX_BPS });
     }
 
     // ── External ──────────────────────────────────────────────────
@@ -159,6 +175,7 @@ pub mod RewardPool {
             self.ownable.assert_only_owner();
 
             // Idempotency check
+            assert(distribution_id != 0, Errors::ZERO_DISTRIBUTION_ID);
             assert(
                 !self.processed_distributions.entry(distribution_id).read(),
                 Errors::ALREADY_DISTRIBUTED,
@@ -168,10 +185,11 @@ pub mod RewardPool {
             assert(len > 0, Errors::EMPTY_RECIPIENTS);
             assert(len == amounts.len(), Errors::LENGTH_MISMATCH);
 
-            // Sum all amounts
+            // Validate recipients and sum amounts
             let mut total: u256 = 0;
             let mut i: u32 = 0;
             while i < len {
+                assert(!(*recipients.at(i)).is_zero(), Errors::ZERO_ADDRESS);
                 total += *amounts.at(i);
                 i += 1;
             };
@@ -231,17 +249,28 @@ pub mod RewardPool {
         fn get_stats(self: @ContractState) -> WeekStats {
             let budget = self.weekly_budget.read();
             let distributed = self.week_distributed.read();
+            let remaining = if budget >= distributed {
+                budget - distributed
+            } else {
+                0
+            };
             WeekStats {
                 current_week: self.current_week.read(),
                 weekly_budget: budget,
                 week_distributed: distributed,
                 total_distributed: self.total_distributed.read(),
-                remaining: budget - distributed,
+                remaining,
             }
         }
 
         fn get_remaining(self: @ContractState) -> u256 {
-            self.weekly_budget.read() - self.week_distributed.read()
+            let budget = self.weekly_budget.read();
+            let distributed = self.week_distributed.read();
+            if budget >= distributed {
+                budget - distributed
+            } else {
+                0
+            }
         }
 
         fn get_token(self: @ContractState) -> ContractAddress {
