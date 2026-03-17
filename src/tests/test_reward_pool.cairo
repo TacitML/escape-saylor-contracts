@@ -365,3 +365,174 @@ fn test_full_week_cycle() {
     let p1_expected: u256 = 2_000_000 + 3_000_000;
     assert(token.balance_of(PLAYER_1()) == p1_expected, 'player 1 total wrong');
 }
+
+// ── Security: zero-address checks ─────────────────────────────────
+
+#[test]
+#[should_panic(expected: 'RP: zero address')]
+fn test_distribute_zero_address_recipient() {
+    let (pool, token) = setup();
+    fund_week(pool, token, WEEK_BUDGET);
+
+    let zero: ContractAddress = 0.try_into().unwrap();
+    start_cheat_caller_address(pool.contract_address, OWNER());
+    pool.distribute('zero_recip', array![zero], array![1_000_000_u256]);
+}
+
+#[test]
+#[should_panic(expected: 'RP: zero address')]
+fn test_distribute_zero_address_in_batch() {
+    let (pool, token) = setup();
+    fund_week(pool, token, WEEK_BUDGET);
+
+    let zero: ContractAddress = 0.try_into().unwrap();
+    start_cheat_caller_address(pool.contract_address, OWNER());
+    // Second recipient is zero — should still be caught
+    pool
+        .distribute(
+            'zero_in_batch',
+            array![PLAYER_1(), zero],
+            array![1_000_000_u256, 1_000_000_u256],
+        );
+}
+
+#[test]
+#[should_panic(expected: 'RP: zero distribution id')]
+fn test_distribute_zero_distribution_id() {
+    let (pool, token) = setup();
+    fund_week(pool, token, WEEK_BUDGET);
+
+    start_cheat_caller_address(pool.contract_address, OWNER());
+    pool.distribute(0, array![PLAYER_1()], array![1_000_000_u256]);
+}
+
+// ── Security: boundary conditions ─────────────────────────────────
+
+#[test]
+fn test_distribute_at_exact_single_tx_cap() {
+    let (pool, token) = setup();
+    fund_week(pool, token, WEEK_BUDGET);
+
+    // Default cap is 15% of 50_000_000 = 7_500_000 — distribute exactly that
+    let exact_cap: u256 = 7_500_000;
+    start_cheat_caller_address(pool.contract_address, OWNER());
+    pool.distribute('exact_cap', array![PLAYER_1()], array![exact_cap]);
+
+    assert(pool.get_stats().week_distributed == exact_cap, 'should equal cap');
+}
+
+#[test]
+fn test_distribute_at_exact_weekly_budget() {
+    let (pool, token) = setup();
+    fund_week(pool, token, WEEK_BUDGET);
+
+    // Raise cap to 100% and distribute exactly the budget
+    start_cheat_caller_address(pool.contract_address, OWNER());
+    pool.set_max_distribution_bps(10_000);
+    pool.distribute('exact_budget', array![PLAYER_1()], array![WEEK_BUDGET]);
+
+    let stats = pool.get_stats();
+    assert(stats.week_distributed == WEEK_BUDGET, 'should equal budget');
+    assert(stats.remaining == 0, 'remaining should be zero');
+    assert(pool.get_remaining() == 0, 'get_remaining should be zero');
+}
+
+#[test]
+fn test_set_max_bps_to_zero_blocks_distributions() {
+    let (pool, token) = setup();
+    fund_week(pool, token, WEEK_BUDGET);
+
+    start_cheat_caller_address(pool.contract_address, OWNER());
+    pool.set_max_distribution_bps(0);
+
+    // cap = (budget * 0) / 10_000 = 0, so any amount > 0 should fail
+    // We expect SINGLE_TX_CAP panic
+    stop_cheat_caller_address(pool.contract_address);
+
+    // Verify by trying a distribution — we rely on the fact that the cap is 0
+    // so get_remaining and get_stats should still work fine
+    let stats = pool.get_stats();
+    assert(stats.weekly_budget == WEEK_BUDGET, 'budget unchanged');
+    assert(stats.remaining == WEEK_BUDGET, 'remaining unchanged');
+}
+
+#[test]
+#[should_panic(expected: 'RP: exceeds single tx cap')]
+fn test_set_max_bps_to_zero_then_distribute_panics() {
+    let (pool, token) = setup();
+    fund_week(pool, token, WEEK_BUDGET);
+
+    start_cheat_caller_address(pool.contract_address, OWNER());
+    pool.set_max_distribution_bps(0);
+    pool.distribute('blocked', array![PLAYER_1()], array![1_u256]);
+}
+
+#[test]
+fn test_multiple_topups_accumulate() {
+    let (pool, token) = setup();
+    fund_week(pool, token, WEEK_BUDGET);
+
+    start_cheat_caller_address(token.contract_address, OWNER());
+    token.approve(pool.contract_address, TOP_UP_AMOUNT * 3);
+    stop_cheat_caller_address(token.contract_address);
+
+    start_cheat_caller_address(pool.contract_address, OWNER());
+    pool.top_up(TOP_UP_AMOUNT);
+    pool.top_up(TOP_UP_AMOUNT);
+    pool.top_up(TOP_UP_AMOUNT);
+    stop_cheat_caller_address(pool.contract_address);
+
+    let expected = WEEK_BUDGET + TOP_UP_AMOUNT * 3;
+    assert(pool.get_stats().weekly_budget == expected, 'budget should accumulate');
+    assert(pool.get_remaining() == expected, 'remaining should match');
+}
+
+#[test]
+fn test_get_remaining_and_get_stats_consistent() {
+    let (pool, token) = setup();
+    fund_week(pool, token, WEEK_BUDGET);
+
+    start_cheat_caller_address(pool.contract_address, OWNER());
+    pool.distribute('batch', array![PLAYER_1()], array![1_000_000_u256]);
+    stop_cheat_caller_address(pool.contract_address);
+
+    let stats = pool.get_stats();
+    assert(pool.get_remaining() == stats.remaining, 'remaining inconsistent');
+    assert(stats.remaining == WEEK_BUDGET - 1_000_000, 'wrong remaining');
+}
+
+#[test]
+fn test_is_distributed_false_before_distribute() {
+    let (pool, _) = setup();
+    assert(!pool.is_distributed('never_used'), 'should be false');
+}
+
+#[test]
+fn test_distribute_skips_zero_amount_entries() {
+    let (pool, token) = setup();
+    fund_week(pool, token, WEEK_BUDGET);
+
+    // Array with a zero amount — contract skips transfer but counts in total check
+    // total = 0 + 1_000_000 = 1_000_000 > 0, so it passes
+    start_cheat_caller_address(pool.contract_address, OWNER());
+    pool
+        .distribute(
+            'with_zero',
+            array![PLAYER_1(), PLAYER_2()],
+            array![0_u256, 1_000_000_u256],
+        );
+    stop_cheat_caller_address(pool.contract_address);
+
+    assert(token.balance_of(PLAYER_1()) == 0, 'player1 should get nothing');
+    assert(token.balance_of(PLAYER_2()) == 1_000_000, 'player2 should get tokens');
+}
+
+#[test]
+#[should_panic(expected: 'RP: amount is zero')]
+fn test_distribute_all_zero_amounts_panics() {
+    let (pool, token) = setup();
+    fund_week(pool, token, WEEK_BUDGET);
+
+    start_cheat_caller_address(pool.contract_address, OWNER());
+    pool.distribute('all_zero', array![PLAYER_1(), PLAYER_2()], array![0_u256, 0_u256]);
+}
